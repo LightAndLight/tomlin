@@ -22,15 +22,21 @@ module Toml
   , Located (..)
 
     -- * TOML syntax
+
+    -- ** Parsing
   , parse
+  , tomlParser
+
+    -- ** Decoding
+  , decode
   , Toml (..)
   , TomlKeyEntry (..)
-  , TomlValue(..)
-  , TomlItem(..)
+  , TomlValue (..)
+  , TomlItem (..)
   )
 where
 
-import Control.Applicative (many, some, (<|>))
+import Control.Applicative (Alternative, many, some, (<|>))
 import Control.Monad (unless)
 import Control.Monad.Error.Class (throwError)
 import Control.Monad.Reader (ReaderT (..))
@@ -60,20 +66,20 @@ load path decoder = do
 data TomlError
   = ParseError
       !Sage.ParseError
-  -- | A required key was not found.
-  | MissingKey
+  | -- | A required key was not found.
+    MissingKey
       -- | Offset
       !Int
       -- | Key name
       !Text
-  -- | There were leftover items in the TOML input.
-  | UnexpectedEntries
+  | -- | There were leftover items in the TOML input.
+    UnexpectedEntries
       -- | Key-value pairs
       ![TomlKeyEntry]
       -- | Non-key-value items (tables, arrays of tables)
       ![Located TomlItem]
-  -- | A value was something other than a string.
-  | ExpectedString
+  | -- | A value was something other than a string.
+    ExpectedString
       -- | Offset
       !Int
   deriving (Show)
@@ -83,60 +89,67 @@ parse input =
   case Sage.parse (tomlParser <* Sage.eof) input of
     Left err -> Left $ ParseError err
     Right a -> pure a
+
+located :: Sage.Parser a -> Sage.Parser (Located a)
+located ma = Located <$> Sage.getOffset <*> ma
+
+token :: Sage.Parser a -> Sage.Parser a
+token ma = ma <* Sage.skipSome (Sage.satisfy (`elem` " \t"))
+
+newlines :: Sage.Parser ()
+newlines = Sage.skipSome (void (Sage.char '\n') <|> void (Sage.string $ fromString "\r\n"))
+
+sepEndBy :: Alternative f => f a -> f sep -> f [a]
+sepEndBy ma sep =
+  (:) <$> ma <*> loop
+    <|> pure []
   where
-    located ma = Located <$> Sage.getOffset <*> ma
-
-    token ma = ma <* Sage.skipSome (Sage.satisfy (`elem` " \t"))
-
-    newlines = Sage.skipSome (void (Sage.char '\n') <|> void (Sage.string $ fromString "\r\n"))
-
-    sepEndBy ma sep =
-      (:) <$> ma <*> loop
+    loop =
+      sep *> ((:) <$> ma <*> loop <|> pure [])
         <|> pure []
-      where
-        loop =
-          sep *> ((:) <$> ma <*> loop <|> pure [])
-            <|> pure []
 
-    sepBy1 ma sep =
-      (:) <$> ma <*> (sep *> Sage.sepBy ma sep <|> pure [])
+sepBy1 :: Sage.Parser a -> Sage.Parser sep -> Sage.Parser [a]
+sepBy1 ma sep =
+  (:) <$> ma <*> (sep *> Sage.sepBy ma sep <|> pure [])
 
-    tomlParser :: Sage.Parser Toml
-    tomlParser =
-      Toml
-        <$> located (Map.fromList <$> sepEndBy keyParser newlines)
-        <*> many (located itemParser)
+tomlParser :: Sage.Parser Toml
+tomlParser =
+  Toml
+    <$> located (Map.fromList <$> sepEndBy keyParser newlines)
+    <*> many (located itemParser)
 
-    nameParser :: Sage.Parser Text
-    nameParser = fmap Text.pack (some . Sage.satisfy $ (||) <$> Char.isAlphaNum <*> (`elem` "_-"))
+nameParser :: Sage.Parser Text
+nameParser = fmap Text.pack (some . Sage.satisfy $ (||) <$> Char.isAlphaNum <*> (`elem` "_-"))
 
-    keyParser :: Sage.Parser (Text, TomlKeyEntry)
-    keyParser =
-      (\(Located keyOffset name) -> (,) name . TomlKeyEntry keyOffset)
-        <$> located (token nameParser)
-        <* token (Sage.char '=')
-        <*> located valueParser
+keyParser :: Sage.Parser (Text, TomlKeyEntry)
+keyParser =
+  (\(Located keyOffset name) -> (,) name . TomlKeyEntry keyOffset)
+    <$> located (token nameParser)
+    <* token (Sage.char '=')
+    <*> located valueParser
 
-    quoted = "\\\""
+quoted :: String
+quoted = "\\\""
 
-    valueParser :: Sage.Parser TomlValue
-    valueParser =
-      VString . Text.pack
-        <$ Sage.char '"'
-        <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
-        <* Sage.char '"'
+valueParser :: Sage.Parser TomlValue
+valueParser =
+  VString . Text.pack
+    <$ Sage.char '"'
+    <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
+    <* Sage.char '"'
 
-    itemParser :: Sage.Parser TomlItem
-    itemParser =
-      tableArrayParser
+itemParser :: Sage.Parser TomlItem
+itemParser =
+  tableArrayParser
 
-    tableArrayParser =
-      TomlTableArray
-        <$ Sage.string (fromString "[[")
-        <*> sepBy1 nameParser (Sage.char '.')
-        <* Sage.string (fromString "]]")
-        <* newlines
-        <*> fmap Map.fromList (sepEndBy keyParser newlines)
+tableArrayParser :: Sage.Parser TomlItem
+tableArrayParser =
+  TomlTableArray
+    <$ Sage.string (fromString "[[")
+    <*> sepBy1 nameParser (Sage.char '.')
+    <* Sage.string (fromString "]]")
+    <* newlines
+    <*> fmap Map.fromList (sepEndBy keyParser newlines)
 
 data Located a = Located {locatedOffset :: !Int, locatedValue :: !a}
   deriving (Show)
@@ -193,7 +206,7 @@ key name valueDecoder = Decoder $ do
     Nothing ->
       throwError $ MissingKey offset name
 
-{- |
+{-|
 @
 [[header]]
 key_0 = value_0
