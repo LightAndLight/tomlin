@@ -1,0 +1,9 @@
+{
+  "sage": {
+    "type": "github",
+    "owner": "LightAndLight",
+    "repository": "sage",
+    "commit": "c449a0eb061e1b9826b692e425ee86b85f4607d5",
+    "directory": "sage"
+  }
+}
