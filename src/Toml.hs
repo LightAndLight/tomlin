@@ -9,6 +9,7 @@ module Toml
     -- * Decoders
   , Decoder
   , key
+  , optionalKey
   , tableArray
 
     -- ** Value decoders
@@ -205,6 +206,19 @@ key name valueDecoder = Decoder $ do
       pure a
     Nothing ->
       throwError $ MissingKey offset name
+
+-- | @key = value@
+optionalKey :: Text -> ValueDecoder a -> Decoder (Maybe a)
+optionalKey name valueDecoder = Decoder $ do
+  Toml (Located offset keys) entries <- get
+  case Map.lookup name keys of
+    Just (TomlKeyEntry _keyOffset value') -> do
+      a <- lift $ valueDecode value' valueDecoder
+      let keys' = Map.delete name keys
+      put $ Toml (Located offset keys') entries
+      pure $ Just a
+    Nothing ->
+      pure Nothing
 
 {-|
 @
