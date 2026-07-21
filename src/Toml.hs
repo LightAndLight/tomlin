@@ -10,6 +10,7 @@ module Toml
   , Decoder
   , key
   , optionalKey
+  , table
   , tableArray
 
     -- ** Value decoders
@@ -73,17 +74,29 @@ data TomlError
       !Int
       -- | Key name
       !Text
+  | -- | A required table was not found.
+    MissingTable
+      -- | Offset
+      !Int
+      -- | Table name
+      !Text
+  | -- | A table was repeated.
+    DuplicateTables
+      -- | Offsets
+      ![Int]
+      -- | Table name
+      !Text
   | -- | There were leftover items in the TOML input.
     UnexpectedEntries
       -- | Key-value pairs
       ![TomlKeyEntry]
-      -- | Non-key-value items (tables, arrays of tables)
-      ![Located TomlItem]
+      -- | Offsets of non-key-value items (tables, arrays of tables)
+      ![Int]
   | -- | A value was something other than a string.
     ExpectedString
       -- | Offset
       !Int
-  deriving (Show)
+  deriving (Show, Eq)
 
 parse :: ByteString -> Either TomlError Toml
 parse input =
@@ -142,6 +155,7 @@ valueParser =
 itemParser :: Sage.Parser TomlItem
 itemParser =
   tableArrayParser
+    <|> tableParser
 
 tableArrayParser :: Sage.Parser TomlItem
 tableArrayParser =
@@ -152,8 +166,17 @@ tableArrayParser =
     <* newlines
     <*> fmap Map.fromList (sepEndBy keyParser newlines)
 
+tableParser :: Sage.Parser TomlItem
+tableParser =
+  TomlTable
+    <$ Sage.char '['
+    <*> sepBy1 nameParser (Sage.char '.')
+    <* Sage.char ']'
+    <* newlines
+    <*> fmap Map.fromList (sepEndBy keyParser newlines)
+
 data Located a = Located {locatedOffset :: !Int, locatedValue :: !a}
-  deriving (Show)
+  deriving (Show, Eq)
 
 data Toml
   = Toml
@@ -169,20 +192,25 @@ data TomlKeyEntry
       !Int
       -- | Value
       !(Located TomlValue)
-  deriving (Show)
+  deriving (Show, Eq)
 
 data TomlItem
-  = TomlTableArray
+  = TomlTable
       -- | Dot-separated header parts
       ![Text]
       -- | Entries
       !(Map Text TomlKeyEntry)
-  deriving (Show)
+  | TomlTableArray
+      -- | Dot-separated header parts
+      ![Text]
+      -- | Entries
+      !(Map Text TomlKeyEntry)
+  deriving (Show, Eq)
 
 data TomlValue
   = VString !Text
   | VInt !Int
-  deriving (Show)
+  deriving (Show, Eq)
 
 newtype Decoder a = Decoder (StateT Toml (Either TomlError) a)
   deriving (Functor, Applicative)
@@ -191,7 +219,7 @@ decode :: Toml -> Decoder a -> Either TomlError a
 decode toml (Decoder decoder) = do
   (a, Toml (Located _offset keys) entries) <- runStateT decoder toml
   unless (Map.null keys && null entries) . throwError $
-    UnexpectedEntries (Map.elems keys) entries
+    UnexpectedEntries (Map.elems keys) (fmap locatedOffset entries)
   pure a
 
 -- | @key = value@
@@ -219,6 +247,38 @@ optionalKey name valueDecoder = Decoder $ do
       pure $ Just a
     Nothing ->
       pure Nothing
+
+{-|
+@
+[header]
+key_0 = value_0
+key_1 = value_1
+key_2 = value_2
+@
+-}
+table :: Text -> Decoder a -> Decoder a
+table name (Decoder decoder) = Decoder $ do
+  Toml (Located offset keys) entries <- get
+
+  let
+    matchingOrNonMatching item =
+      case locatedValue item of
+        TomlTable (part : parts) entries' | part == name -> Left (locatedOffset item, parts, entries')
+        _ -> Right item
+  let (matching, nonMatching) = partitionEithers $ fmap matchingOrNonMatching entries
+
+  case matching of
+    [] -> throwError $ MissingTable offset name
+    _item : rest@(_ : _) -> throwError $ DuplicateTables (fmap (\(offset', _parts, _entries) -> offset') rest) name
+    [(offset', [], entries')] -> do
+      (a, Toml (Located _offset keys'') entries'') <-
+        lift $ runStateT decoder (Toml (Located offset' entries') [])
+      unless (Map.null keys'' && null entries'') . throwError $
+        UnexpectedEntries (Map.elems keys'') (fmap locatedOffset entries'')
+      put $ Toml (Located offset keys) nonMatching
+      pure a
+    [(_offset', _ : _, _entries')] ->
+      error "TODO: nested tables"
 
 {-|
 @
@@ -264,9 +324,11 @@ tableArray name (Decoder decoder) = Decoder $ do
         Left err -> Left err
         Right (a, Toml (Located _offset keys'') entries'') -> do
           unless (Map.null keys'' && null entries'') . throwError $
-            UnexpectedEntries (Map.elems keys'') entries''
+            UnexpectedEntries (Map.elems keys'') (fmap locatedOffset entries'')
           (a :) <$> loop suffix
     loop entry@(Located _ (TomlTableArray (_ : _) _) : _) = do
+      error $ "impossible: " ++ show entry
+    loop entry@(Located _ (TomlTable _ _) : _) =
       error $ "impossible: " ++ show entry
 
   as <- lift $ loop matching

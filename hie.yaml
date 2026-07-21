@@ -1,0 +1,7 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:tomlin"
+
+    - path: "./test"
+      component: "tomlin:test:tomlin-tests"

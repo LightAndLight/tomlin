@@ -22,6 +22,7 @@
 
             just
             haskellPackages.fourmolu
+            haskellPackages.implicit-hie
             fd
 
             cabal2nix
