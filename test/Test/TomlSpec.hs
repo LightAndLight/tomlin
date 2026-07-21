@@ -194,3 +194,40 @@ spec = do
         )
         `shouldBe` Left
           (Toml.DuplicateKey (length input1) (fromString "key_1"))
+
+  describe "arrays" $ do
+    it "success" $ do
+      let
+        input =
+          unlines
+            [ "key = [\"value_1\", \"value_2\", \"value_3\"]"
+            ]
+
+        decoder =
+          Toml.key (fromString "key") (Toml.list Toml.string)
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right ["value_1", "value_2", "value_3"]
+
+    it "success multiline" $ do
+      let
+        input =
+          unlines
+            [ "key = ["
+            , "  \"value_1\","
+            , "  \"value_2\","
+            , "  \"value_3\""
+            , "]"
+            ]
+
+        decoder =
+          Toml.key (fromString "key") (Toml.list Toml.string)
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right ["value_1", "value_2", "value_3"]

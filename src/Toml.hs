@@ -19,6 +19,7 @@ module Toml
   , string
   , text
   , pstring
+  , list
 
     -- * Error types
   , TomlError (..)
@@ -127,7 +128,7 @@ located :: Sage.Parser a -> Sage.Parser (Located a)
 located ma = Located <$> Sage.getOffset <*> ma
 
 token :: Sage.Parser a -> Sage.Parser a
-token ma = ma <* Sage.skipSome (Sage.satisfy (`elem` " \t"))
+token ma = ma <* Sage.skipMany (Sage.satisfy (`elem` " \t"))
 
 newlines :: Sage.Parser ()
 newlines = Sage.skipSome (void (Sage.char '\n') <|> void (Sage.string $ fromString "\r\n"))
@@ -159,17 +160,34 @@ keyParser =
   (\(Located keyOffset name) -> (,) name . TomlKeyEntry keyOffset)
     <$> located (token nameParser)
     <* token (Sage.char '=')
-    <*> located valueParser
+    <*> located (valueParser TopLevel)
 
 quoted :: String
 quoted = "\\\""
 
-valueParser :: Sage.Parser TomlValue
-valueParser =
-  VString . Text.pack
-    <$ Sage.char '"'
-    <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
-    <* Sage.char '"'
+data ValueContext
+  = -- | A value that comes after a key's @=@ sign.
+    TopLevel
+  | -- | A value that is contained by another (e.g. array items)
+    Nested
+
+valueParser :: ValueContext -> Sage.Parser TomlValue
+valueParser ctx =
+  valueToken $
+    VString . Text.pack
+      <$ Sage.char '"'
+      <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
+      <* Sage.char '"'
+      <|> VArray
+        <$ nestedToken (Sage.char '[')
+        <*> Sage.sepBy (located $ valueParser Nested) (nestedToken $ Sage.char ',')
+        <* Sage.char ']'
+  where
+    nestedToken p = p <* Sage.skipMany (Sage.satisfy Char.isSpace)
+    valueToken =
+      case ctx of
+        TopLevel -> token
+        Nested -> nestedToken
 
 itemParser :: Sage.Parser TomlItem
 itemParser =
@@ -229,6 +247,7 @@ data TomlItem
 data TomlValue
   = VString !Text
   | VInt !Int
+  | VArray ![Located TomlValue]
   deriving (Show, Eq)
 
 newtype Decoder a = Decoder (StateT Toml (Either TomlError) a)
@@ -405,4 +424,13 @@ pstring p =
         VString s -> do
           let input = Text.Encoding.encodeUtf8 s
           first (StringParseError offset input) $ Sage.parse (p <* Sage.eof) input
+        _ -> Left $ ExpectedString offset
+
+-- | Decode an array.
+list :: ValueDecoder a -> ValueDecoder [a]
+list decoder =
+  ValueDecoder $
+    \(Located offset value) ->
+      case value of
+        VArray xs -> traverse (`valueDecode` decoder) xs
         _ -> Left $ ExpectedString offset
