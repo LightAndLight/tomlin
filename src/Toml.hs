@@ -112,6 +112,8 @@ data TomlError
   | StringParseError
       -- | Offset of string
       !Int
+      -- | String's value
+      !ByteString
       !Sage.ParseError
   deriving (Show, Eq)
 
@@ -400,6 +402,7 @@ pstring p =
   ValueDecoder $
     \(Located offset value) ->
       case value of
-        VString s ->
-          first (StringParseError offset) $ Sage.parse (p <* Sage.eof) (Text.Encoding.encodeUtf8 s)
+        VString s -> do
+          let input = Text.Encoding.encodeUtf8 s
+          first (StringParseError offset input) $ Sage.parse (p <* Sage.eof) input
         _ -> Left $ ExpectedString offset
