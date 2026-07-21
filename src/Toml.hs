@@ -18,6 +18,7 @@ module Toml
   , ValueDecoder
   , string
   , text
+  , pstring
 
     -- * Error types
   , TomlError (..)
@@ -44,6 +45,7 @@ import Control.Monad (unless)
 import Control.Monad.Error.Class (liftEither, throwError)
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.State (StateT, get, lift, put, runStateT)
+import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.Char as Char
@@ -51,12 +53,13 @@ import Data.Either (partitionEithers)
 import Data.Foldable (foldlM)
 import Data.Function (on)
 import Data.Functor (void)
-import Data.List (delete, deleteBy)
+import Data.List (deleteBy)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import qualified Text.Sage as Sage
 
 load :: FilePath -> Decoder a -> IO (Either TomlError a)
@@ -106,6 +109,10 @@ data TomlError
     ExpectedString
       -- | Offset
       !Int
+  | StringParseError
+      -- | Offset of string
+      !Int
+      !Sage.ParseError
   deriving (Show, Eq)
 
 parse :: ByteString -> Either TomlError Toml
@@ -374,6 +381,7 @@ newtype ValueDecoder a = ValueDecoder (Located TomlValue -> Either TomlError a)
 valueDecode :: Located TomlValue -> ValueDecoder a -> Either TomlError a
 valueDecode value (ValueDecoder decoder) = decoder value
 
+-- | Decode a string literal as 'Text'.
 text :: ValueDecoder Text
 text =
   ValueDecoder $
@@ -382,5 +390,16 @@ text =
         VString s -> Right s
         _ -> Left $ ExpectedString offset
 
+-- | Decode a string literal as a 'String'.
 string :: ValueDecoder String
 string = Text.unpack <$> text
+
+-- | Parse the value of a string literal.
+pstring :: Sage.Parser a -> ValueDecoder a
+pstring p =
+  ValueDecoder $
+    \(Located offset value) ->
+      case value of
+        VString s ->
+          first (StringParseError offset) $ Sage.parse (p <* Sage.eof) (Text.Encoding.encodeUtf8 s)
+        _ -> Left $ ExpectedString offset
