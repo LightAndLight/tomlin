@@ -33,6 +33,7 @@ test-suite tomlin-tests
         hspec-discover:hspec-discover
     build-depends:
         base ^>=4.20.2.0,
+        containers,
         hspec,
         tomlin
     hs-source-dirs:   test

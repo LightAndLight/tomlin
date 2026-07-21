@@ -10,6 +10,7 @@ module Toml
   , Decoder
   , key
   , optionalKey
+  , keys
   , table
   , tableArray
 
@@ -40,14 +41,17 @@ where
 
 import Control.Applicative (Alternative, many, some, (<|>))
 import Control.Monad (unless)
-import Control.Monad.Error.Class (throwError)
+import Control.Monad.Error.Class (liftEither, throwError)
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.State (StateT, get, lift, put, runStateT)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.Char as Char
 import Data.Either (partitionEithers)
+import Data.Foldable (foldlM)
+import Data.Function (on)
 import Data.Functor (void)
+import Data.List (delete, deleteBy)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.String (fromString)
@@ -70,6 +74,12 @@ data TomlError
       !Sage.ParseError
   | -- | A required key was not found.
     MissingKey
+      -- | Offset
+      !Int
+      -- | Key name
+      !Text
+  | -- | A key was repeated.
+    DuplicateKey
       -- | Offset
       !Int
       -- | Key name
@@ -129,7 +139,7 @@ sepBy1 ma sep =
 tomlParser :: Sage.Parser Toml
 tomlParser =
   Toml
-    <$> located (Map.fromList <$> sepEndBy keyParser newlines)
+    <$> located (sepEndBy keyParser newlines)
     <*> many (located itemParser)
 
 nameParser :: Sage.Parser Text
@@ -164,7 +174,7 @@ tableArrayParser =
     <*> sepBy1 nameParser (Sage.char '.')
     <* Sage.string (fromString "]]")
     <* newlines
-    <*> fmap Map.fromList (sepEndBy keyParser newlines)
+    <*> sepEndBy keyParser newlines
 
 tableParser :: Sage.Parser TomlItem
 tableParser =
@@ -173,7 +183,7 @@ tableParser =
     <*> sepBy1 nameParser (Sage.char '.')
     <* Sage.char ']'
     <* newlines
-    <*> fmap Map.fromList (sepEndBy keyParser newlines)
+    <*> sepEndBy keyParser newlines
 
 data Located a = Located {locatedOffset :: !Int, locatedValue :: !a}
   deriving (Show, Eq)
@@ -181,7 +191,7 @@ data Located a = Located {locatedOffset :: !Int, locatedValue :: !a}
 data Toml
   = Toml
       -- | Top-level key-value pairs
-      !(Located (Map Text TomlKeyEntry))
+      !(Located [(Text, TomlKeyEntry)])
       -- | Non-key-value items (tables, arrays of tables)
       [Located TomlItem]
   deriving (Show)
@@ -199,12 +209,12 @@ data TomlItem
       -- | Dot-separated header parts
       ![Text]
       -- | Entries
-      !(Map Text TomlKeyEntry)
+      ![(Text, TomlKeyEntry)]
   | TomlTableArray
       -- | Dot-separated header parts
       ![Text]
       -- | Entries
-      !(Map Text TomlKeyEntry)
+      ![(Text, TomlKeyEntry)]
   deriving (Show, Eq)
 
 data TomlValue
@@ -218,18 +228,18 @@ newtype Decoder a = Decoder (StateT Toml (Either TomlError) a)
 decode :: Toml -> Decoder a -> Either TomlError a
 decode toml (Decoder decoder) = do
   (a, Toml (Located _offset keys) entries) <- runStateT decoder toml
-  unless (Map.null keys && null entries) . throwError $
-    UnexpectedEntries (Map.elems keys) (fmap locatedOffset entries)
+  unless (null keys && null entries) . throwError $
+    UnexpectedEntries (fmap snd keys) (fmap locatedOffset entries)
   pure a
 
 -- | @key = value@
 key :: Text -> ValueDecoder a -> Decoder a
 key name valueDecoder = Decoder $ do
   Toml (Located offset keys) entries <- get
-  case Map.lookup name keys of
+  case lookup name keys of
     Just (TomlKeyEntry _keyOffset value') -> do
       a <- lift $ valueDecode value' valueDecoder
-      let keys' = Map.delete name keys
+      let keys' = deleteBy ((==) `on` fst) (name, undefined) keys
       put $ Toml (Located offset keys') entries
       pure a
     Nothing ->
@@ -239,14 +249,36 @@ key name valueDecoder = Decoder $ do
 optionalKey :: Text -> ValueDecoder a -> Decoder (Maybe a)
 optionalKey name valueDecoder = Decoder $ do
   Toml (Located offset keys) entries <- get
-  case Map.lookup name keys of
+  case lookup name keys of
     Just (TomlKeyEntry _keyOffset value') -> do
       a <- lift $ valueDecode value' valueDecoder
-      let keys' = Map.delete name keys
+      let keys' = deleteBy ((==) `on` fst) (name, undefined) keys
       put $ Toml (Located offset keys') entries
       pure $ Just a
     Nothing ->
       pure Nothing
+
+-- | Decode all remaining keys.
+keys :: ValueDecoder a -> Decoder (Map Text a)
+keys decoder = Decoder $ do
+  Toml keys entries <- get
+
+  keys' <-
+    foldlM
+      ( \acc (key, TomlKeyEntry offset value) ->
+          if Map.member key acc
+            then
+              throwError $ DuplicateKey offset key
+            else do
+              value' <- liftEither $ valueDecode value decoder
+              pure $ Map.insert key value' acc
+      )
+      mempty
+      (locatedValue keys)
+
+  put $ Toml keys{locatedValue = mempty} entries
+
+  pure keys'
 
 {-|
 @
@@ -273,8 +305,8 @@ table name (Decoder decoder) = Decoder $ do
     [(offset', [], entries')] -> do
       (a, Toml (Located _offset keys'') entries'') <-
         lift $ runStateT decoder (Toml (Located offset' entries') [])
-      unless (Map.null keys'' && null entries'') . throwError $
-        UnexpectedEntries (Map.elems keys'') (fmap locatedOffset entries'')
+      unless (null keys'' && null entries'') . throwError $
+        UnexpectedEntries (fmap snd keys'') (fmap locatedOffset entries'')
       put $ Toml (Located offset keys) nonMatching
       pure a
     [(_offset', _ : _, _entries')] ->
@@ -323,8 +355,8 @@ tableArray name (Decoder decoder) = Decoder $ do
       case runStateT decoder $ Toml (Located offset entries') prefix of
         Left err -> Left err
         Right (a, Toml (Located _offset keys'') entries'') -> do
-          unless (Map.null keys'' && null entries'') . throwError $
-            UnexpectedEntries (Map.elems keys'') (fmap locatedOffset entries'')
+          unless (null keys'' && null entries'') . throwError $
+            UnexpectedEntries (fmap snd keys'') (fmap locatedOffset entries'')
           (a :) <$> loop suffix
     loop entry@(Located _ (TomlTableArray (_ : _) _) : _) = do
       error $ "impossible: " ++ show entry

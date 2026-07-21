@@ -1,5 +1,6 @@
 module Test.TomlSpec (spec) where
 
+import qualified Data.Map as Map
 import Data.String (fromString)
 import Test.Hspec (Spec, describe, it, shouldBe)
 import qualified Toml
@@ -138,3 +139,58 @@ spec = do
           Toml.decode toml decoder
         )
         `shouldBe` Left (Toml.UnexpectedEntries mempty [length input1])
+
+  describe "keys" $ do
+    it "success" $ do
+      let
+        input =
+          unlines
+            [ "[header]"
+            , "key_1 = \"value_1\""
+            , "key_2 = \"value_2\""
+            , "key_3 = \"value_3\""
+            ]
+
+        decoder =
+          Toml.table (fromString "header") $
+            Toml.keys Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right
+          ( Map.fromList
+              [ (fromString "key_1", fromString "value_1")
+              , (fromString "key_2", fromString "value_2")
+              , (fromString "key_3", fromString "value_3")
+              ]
+          )
+
+    it "duplicate" $ do
+      let
+        input1 =
+          concatMap
+            (++ "\n")
+            [ "[header]"
+            , "key_1 = \"value_1\""
+            ]
+
+        input2 =
+          unlines
+            [ "key_1 = \"value_2\""
+            , "key_3 = \"value_3\""
+            ]
+
+        input = input1 ++ input2
+
+        decoder =
+          Toml.table (fromString "header") $
+            Toml.keys Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Left
+          (Toml.DuplicateKey (length input1) (fromString "key_1"))
