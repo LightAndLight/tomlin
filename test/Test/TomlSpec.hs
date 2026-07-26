@@ -1,5 +1,6 @@
 module Test.TomlSpec (spec) where
 
+import Control.Applicative ((<|>))
 import qualified Data.Map as Map
 import Data.String (fromString)
 import Test.Hspec (Spec, describe, it, shouldBe)
@@ -231,3 +232,116 @@ spec = do
           Toml.decode toml decoder
         )
         `shouldBe` Right ["value_1", "value_2", "value_3"]
+
+  describe "inline records" $ do
+    it "success" $ do
+      let
+        input =
+          unlines
+            [ "key = { field_1 = \"value_1\", field_2 = \"value_2\" }"
+            ]
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              (,)
+                <$> Toml.recordKey (fromString "field_1") Toml.string
+                <*> Toml.recordKey (fromString "field_2") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right ("value_1", "value_2")
+
+    it "success nested" $ do
+      let
+        input =
+          unlines
+            [ "key = { outer = { inner = \"value\" } }"
+            ]
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              Toml.recordKey (fromString "outer") $
+                Toml.record $
+                  Toml.recordKey (fromString "inner") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right "value"
+
+    it "success alternative" $ do
+      let
+        input =
+          unlines
+            [ "key = { field_2 = \"value_2\" }"
+            ]
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              Left <$> Toml.recordKey (fromString "field_1") Toml.string
+                <|> Right <$> Toml.recordKey (fromString "field_2") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right (Right "value_2")
+
+    it "expected record" $ do
+      let
+        input1 = "key = "
+        input2 = "\"value\"\n"
+        input = input1 ++ input2
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              Toml.recordKey (fromString "field_1") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Left (Toml.ExpectedRecord $ length input1)
+
+    it "missing field" $ do
+      let
+        input1 = "key = "
+        input2 = "{ field_1 = \"value_1\" }\n"
+        input = input1 ++ input2
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              (,)
+                <$> Toml.recordKey (fromString "field_1") Toml.string
+                <*> Toml.recordKey (fromString "field_2") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Left (Toml.MissingField (length input1) (fromString "field_2"))
+
+    it "unexpected fields" $ do
+      let
+        input1 = "key = { field_1 = \"value_1\", "
+        input2 = "field_2 = \"value_2\" }\n"
+        input = input1 ++ input2
+
+        decoder =
+          Toml.key (fromString "key") $
+            Toml.record $
+              Toml.recordKey (fromString "field_1") Toml.string
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Left (Toml.UnexpectedFields [length input1])

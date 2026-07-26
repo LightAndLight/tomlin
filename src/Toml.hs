@@ -16,10 +16,15 @@ module Toml
 
     -- ** Value decoders
   , ValueDecoder
+  , bool
   , string
   , text
   , pstring
   , list
+  , record
+  , RecordDecoder
+  , recordKey
+  , value
 
     -- * Error types
   , TomlError (..)
@@ -41,11 +46,15 @@ module Toml
   )
 where
 
-import Control.Applicative (Alternative, many, some, (<|>))
+import Control.Applicative (Alternative (..), many, some)
 import Control.Monad (unless)
 import Control.Monad.Error.Class (liftEither, throwError)
+import Control.Monad.Except (ExceptT, runExceptT)
 import Control.Monad.Reader (ReaderT (..))
-import Control.Monad.State (StateT, get, lift, put, runStateT)
+import Control.Monad.Reader.Class (ask)
+import Control.Monad.State (State, StateT, get, lift, put, runState, runStateT)
+import Control.Monad.Writer.CPS (Writer, WriterT, runWriter, runWriterT)
+import Control.Monad.Writer.Class (tell)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -57,6 +66,7 @@ import Data.Functor (void)
 import Data.List (deleteBy)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Monoid (Any (..))
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -76,6 +86,10 @@ load path decoder = do
 data TomlError
   = ParseError
       !Sage.ParseError
+  | -- | Decoder failed due to 'empty'
+    DecodeFail
+      -- | Offset of contex in which the failure occurred.
+      !Int
   | -- | A required key was not found.
     MissingKey
       -- | Offset
@@ -116,6 +130,20 @@ data TomlError
       -- | String's value
       !ByteString
       !Sage.ParseError
+  | -- | A value was something other than a record.
+    ExpectedRecord
+      -- | Offset
+      !Int
+  | -- A record contains unexpected fields.
+    UnexpectedFields
+      -- | Offsets of field names
+      ![Int]
+  | -- A record was missing a required field.
+    MissingField
+      -- | Offset of record
+      !Int
+      -- | Missing field name
+      !Text
   deriving (Show, Eq)
 
 parse :: ByteString -> Either TomlError Toml
@@ -135,12 +163,15 @@ newlines = Sage.skipSome (void (Sage.char '\n') <|> void (Sage.string $ fromStri
 
 sepEndBy :: Alternative f => f a -> f sep -> f [a]
 sepEndBy ma sep =
-  (:) <$> ma <*> loop
-    <|> pure []
+  (:)
+    <$> ma
+    <*> loop
+      <|> pure []
   where
     loop =
-      sep *> ((:) <$> ma <*> loop <|> pure [])
-        <|> pure []
+      sep
+        *> ((:) <$> ma <*> loop <|> pure [])
+          <|> pure []
 
 sepBy1 :: Sage.Parser a -> Sage.Parser sep -> Sage.Parser [a]
 sepBy1 ma sep =
@@ -178,10 +209,20 @@ valueParser ctx =
       <$ Sage.char '"'
       <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
       <* Sage.char '"'
-      <|> VArray
-        <$ nestedToken (Sage.char '[')
-        <*> Sage.sepBy (located $ valueParser Nested) (nestedToken $ Sage.char ',')
-        <* Sage.char ']'
+        <|> VArray
+      <$ nestedToken (Sage.char '[')
+      <*> Sage.sepBy (located $ valueParser Nested) (nestedToken $ Sage.char ',')
+      <* Sage.char ']'
+        <|> VRecord
+      <$ nestedToken (Sage.char '{')
+      <*> Sage.sepBy
+        ( (,)
+            <$> located (nestedToken nameParser)
+            <* nestedToken (Sage.char '=')
+            <*> located (valueParser Nested)
+        )
+        (nestedToken $ Sage.char ',')
+      <* Sage.char '}'
   where
     nestedToken p = p <* Sage.skipMany (Sage.satisfy Char.isSpace)
     valueToken =
@@ -245,9 +286,12 @@ data TomlItem
   deriving (Show, Eq)
 
 data TomlValue
-  = VString !Text
+  = VTrue
+  | VFalse
+  | VString !Text
   | VInt !Int
   | VArray ![Located TomlValue]
+  | VRecord ![(Located Text, Located TomlValue)]
   deriving (Show, Eq)
 
 newtype Decoder a = Decoder (StateT Toml (Either TomlError) a)
@@ -411,6 +455,16 @@ text =
         VString s -> Right s
         _ -> Left $ ExpectedString offset
 
+-- | Decode a boolean as a 'Bool'.
+bool :: ValueDecoder Bool
+bool =
+  ValueDecoder $
+    \(Located offset value) ->
+      case value of
+        VTrue -> Right True
+        VFalse -> Right False
+        _ -> Left $ ExpectedString offset
+
 -- | Decode a string literal as a 'String'.
 string :: ValueDecoder String
 string = Text.unpack <$> text
@@ -434,3 +488,61 @@ list decoder =
       case value of
         VArray xs -> traverse (`valueDecode` decoder) xs
         _ -> Left $ ExpectedString offset
+
+-- | Decode an arbitrary 'TomlValue'.
+value :: ValueDecoder TomlValue
+value = ValueDecoder $ \(Located _offset value) -> Right value
+
+newtype RecordDecoder a
+  = RecordDecoder
+      ( ExceptT
+          TomlError
+          (WriterT Any (ReaderT Int (State (Map Text (Located Text, Located TomlValue)))))
+          a
+      )
+  deriving (Functor, Applicative)
+
+instance Alternative RecordDecoder where
+  empty = RecordDecoder $ throwError . DecodeFail =<< ask
+  RecordDecoder ma <|> RecordDecoder mb =
+    RecordDecoder $ do
+      (result, Any consumed) <- lift . lift . runWriterT . runExceptT $ ma
+      case result of
+        Left err ->
+          if consumed
+            then throwError err
+            else mb
+        Right a -> pure a
+
+-- | Decode an inline table.
+record :: RecordDecoder a -> ValueDecoder a
+record (RecordDecoder decoder) =
+  ValueDecoder $ \(Located offset value) ->
+    case value of
+      VRecord fields -> do
+        let
+          ((result, _consumed), state) =
+            flip runState (Map.fromList [(locatedValue k, (k, v)) | (k, v) <- fields])
+              . flip runReaderT offset
+              . runWriterT
+              . runExceptT
+              $ decoder
+        a <- liftEither result
+        unless (Map.null state) . throwError $
+          UnexpectedFields [locatedOffset k | (k, _v) <- Map.elems state]
+        pure a
+      _ -> Left $ ExpectedRecord offset
+
+recordKey :: Text -> ValueDecoder a -> RecordDecoder a
+recordKey key decoder =
+  RecordDecoder $ do
+    fields <- get
+    case Map.lookup key fields of
+      Nothing -> do
+        offset <- ask
+        throwError $ MissingField offset key
+      Just (_key, val) -> do
+        a <- liftEither $ valueDecode val decoder
+        put $ Map.delete key fields
+        tell $ Any True
+        pure a

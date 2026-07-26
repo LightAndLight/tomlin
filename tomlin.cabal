@@ -19,7 +19,7 @@ library
         base ^>=4.20.2.0,
         bytestring,
         containers,
-        mtl,
+        mtl >=2.3.2,
         text >=2.0,
         sage
     hs-source-dirs:   src
