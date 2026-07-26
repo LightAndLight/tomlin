@@ -16,6 +16,7 @@ module Toml
 
     -- ** Value decoders
   , ValueDecoder
+  , alt
   , bool
   , string
   , text
@@ -445,6 +446,24 @@ newtype ValueDecoder a = ValueDecoder (Located TomlValue -> Either TomlError a)
 
 valueDecode :: Located TomlValue -> ValueDecoder a -> Either TomlError a
 valueDecode value (ValueDecoder decoder) = decoder value
+
+{-| Fall through to the second decoder if the first fails.
+
+Note: 'ValueDecoder' has no 'Alternative' instance because it can't have an 'Applicative' instance.
+-}
+alt ::
+  -- | First decoder
+  ValueDecoder a ->
+  -- | Fallback
+  ValueDecoder a ->
+  ValueDecoder a
+alt (ValueDecoder ma) (ValueDecoder mb) =
+  ValueDecoder $ \value ->
+    case ma value of
+      Left{} -> mb value
+      Right a -> pure a
+
+infixl 3 `alt`
 
 -- | Decode a string literal as 'Text'.
 text :: ValueDecoder Text
