@@ -206,35 +206,44 @@ data ValueContext
 valueParser :: ValueContext -> Sage.Parser TomlValue
 valueParser ctx =
   valueToken $
-    VTrue
-      <$ Sage.string (fromString "true")
-        <|> VFalse
-      <$ Sage.string (fromString "false")
-        <|> VString
-        . Text.pack
-      <$ Sage.char '"'
-      <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
-      <* Sage.char '"'
-        <|> VArray
-      <$ nestedToken (Sage.char '[')
-      <*> Sage.sepBy (located $ valueParser Nested) (nestedToken $ Sage.char ',')
-      <* Sage.char ']'
-        <|> VRecord
-      <$ nestedToken (Sage.char '{')
-      <*> Sage.sepBy
-        ( (,)
-            <$> located (nestedToken nameParser)
-            <* nestedToken (Sage.char '=')
-            <*> located (valueParser Nested)
-        )
-        (nestedToken $ Sage.char ',')
-      <* Sage.char '}'
+    boolParser
+      <|> stringParser
+      <|> arrayParser
+      <|> recordParser
   where
     nestedToken p = p <* Sage.skipMany (Sage.satisfy Char.isSpace)
     valueToken =
       case ctx of
         TopLevel -> token
         Nested -> nestedToken
+
+    boolParser =
+      (VTrue <$ Sage.string (fromString "true"))
+        <|> (VFalse <$ Sage.string (fromString "false"))
+
+    stringParser =
+      VString . Text.pack
+        <$ Sage.char '"'
+        <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
+        <* Sage.char '"'
+
+    arrayParser =
+      VArray
+        <$ nestedToken (Sage.char '[')
+        <*> Sage.sepBy (located $ valueParser Nested) (nestedToken $ Sage.char ',')
+        <* Sage.char ']'
+
+    recordParser =
+      VRecord
+        <$ nestedToken (Sage.char '{')
+        <*> Sage.sepBy
+          ( (,)
+              <$> located (nestedToken nameParser)
+              <* nestedToken (Sage.char '=')
+              <*> located (valueParser Nested)
+          )
+          (nestedToken $ Sage.char ',')
+        <* Sage.char '}'
 
 itemParser :: Sage.Parser TomlItem
 itemParser =
