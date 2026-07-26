@@ -206,7 +206,12 @@ data ValueContext
 valueParser :: ValueContext -> Sage.Parser TomlValue
 valueParser ctx =
   valueToken $
-    VString . Text.pack
+    VTrue
+      <$ Sage.string (fromString "true")
+        <|> VFalse
+      <$ Sage.string (fromString "false")
+        <|> VString
+        . Text.pack
       <$ Sage.char '"'
       <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
       <* Sage.char '"'
