@@ -37,6 +37,7 @@ module Toml
     -- ** Parsing
   , parse
   , tomlParser
+  , keyParser
 
     -- ** Decoding
   , decode
@@ -178,6 +179,7 @@ sepBy1 :: Sage.Parser a -> Sage.Parser sep -> Sage.Parser [a]
 sepBy1 ma sep =
   (:) <$> ma <*> (sep *> Sage.sepBy ma sep <|> pure [])
 
+-- | A TOML document
 tomlParser :: Sage.Parser Toml
 tomlParser =
   Toml
@@ -187,6 +189,7 @@ tomlParser =
 nameParser :: Sage.Parser Text
 nameParser = fmap Text.pack (some . Sage.satisfy $ (||) <$> Char.isAlphaNum <*> (`elem` "_-"))
 
+-- | A key-value entry
 keyParser :: Sage.Parser (Text, TomlKeyEntry)
 keyParser =
   (\(Located keyOffset name) -> (,) name . TomlKeyEntry keyOffset)
