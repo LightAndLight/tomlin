@@ -38,6 +38,8 @@ module Toml
   , parse
   , tomlParser
   , keyParser
+  , ValueContext (..)
+  , valueParser
 
     -- ** Decoding
   , decode
@@ -212,7 +214,12 @@ data ValueContext
   | -- | A value that is contained by another (e.g. array items)
     Nested
 
-valueParser :: ValueContext -> Sage.Parser TomlValue
+valueParser ::
+  {-| * 'TopLevel': only the space character is considered whitespace
+  * 'Nested': every space-like ('Char.isSpace') character is considered whitespace
+  -}
+  ValueContext ->
+  Sage.Parser TomlValue
 valueParser ctx =
   valueToken $
     boolParser
