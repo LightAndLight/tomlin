@@ -45,6 +45,10 @@ module Toml
   , TomlKeyEntry (..)
   , TomlValue (..)
   , TomlItem (..)
+
+    -- ** Printing
+  , keyPrinter
+  , valuePrinter
   )
 where
 
@@ -55,7 +59,7 @@ import Control.Monad.Except (ExceptT, runExceptT)
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.Reader.Class (ask)
 import Control.Monad.State (State, StateT, get, lift, put, runState, runStateT)
-import Control.Monad.Writer.CPS (Writer, WriterT, runWriter, runWriterT)
+import Control.Monad.Writer.CPS (WriterT, runWriterT)
 import Control.Monad.Writer.Class (tell)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
@@ -73,6 +77,8 @@ import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
+import Data.Text.Lazy.Builder (Builder)
+import qualified Data.Text.Lazy.Builder as Builder
 import qualified Text.Sage as Sage
 
 load :: FilePath -> Decoder a -> IO (Either TomlError a)
@@ -582,3 +588,34 @@ recordKey key decoder =
         put $ Map.delete key fields
         tell $ Any True
         pure a
+
+keyPrinter :: Text -> TomlValue -> Builder
+keyPrinter key value =
+  Builder.fromText key
+    <> fromString " = "
+    <> valuePrinter value
+
+valuePrinter :: TomlValue -> Builder
+valuePrinter value =
+  case value of
+    VTrue -> fromString "true"
+    VFalse -> fromString "false"
+    VString s -> fromString "\"" <> foldMap escapeChar (Text.unpack s) <> fromString "\""
+    VInt n -> fromString (show n)
+    VArray items ->
+      fromString "["
+        <> sepBy (fromString ", ") (fmap (valuePrinter . locatedValue) items)
+        <> fromString "]"
+    VRecord fields -> fromString "{" <> sepBy (fromString ", ") (fmap (uncurry fieldPrinter) fields) <> fromString "}"
+  where
+    sepBy :: Monoid m => m -> [m] -> m
+    sepBy _sep [] = mempty
+    sepBy _sep [x] = x
+    sepBy sep (x : xs@(_ : _)) = x <> sep <> sepBy sep xs
+
+    fieldPrinter :: Located Text -> Located TomlValue -> Builder
+    fieldPrinter (Located _offset key) (Located _offset' value) = keyPrinter key value
+
+    escapeChar :: Char -> Builder
+    escapeChar '"' = fromString "\\\""
+    escapeChar c = Builder.fromText $ Text.singleton c
