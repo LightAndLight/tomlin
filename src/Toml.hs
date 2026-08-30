@@ -54,7 +54,7 @@ module Toml
   )
 where
 
-import Control.Applicative (Alternative (..), many, some)
+import Control.Applicative (Alternative (..), many, optional, some)
 import Control.Monad (unless)
 import Control.Monad.Error.Class (liftEither, throwError)
 import Control.Monad.Except (ExceptT, runExceptT)
@@ -205,9 +205,6 @@ keyParser =
     <* token (Sage.char '=')
     <*> located (valueParser TopLevel)
 
-quoted :: String
-quoted = "\\\""
-
 data ValueContext
   = -- | A value that comes after a key's @=@ sign.
     TopLevel
@@ -224,6 +221,7 @@ valueParser ctx =
   valueToken $
     boolParser
       <|> stringParser
+      <|> multilineStringParser
       <|> arrayParser
       <|> recordParser
   where
@@ -237,11 +235,27 @@ valueParser ctx =
       (VTrue <$ Sage.string (fromString "true"))
         <|> (VFalse <$ Sage.string (fromString "false"))
 
+    quoted :: String
+    quoted = "\\\""
+
     stringParser =
       VString . Text.pack
-        <$ Sage.char '"'
+        <$ Sage.label
+          (Sage.Char '"')
+          (Sage.try $ Sage.char '"' <* Sage.notFollowedBy (Sage.string $ fromString "\"\""))
         <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
         <* Sage.char '"'
+
+    multilineStringParser =
+      VString . Text.pack
+        <$ Sage.string (fromString "\"\"\"")
+        <* optional (Sage.char '\n')
+        <*> many
+          ( Sage.satisfy (`notElem` quoted)
+              <|> Sage.try (Sage.char '"' <* Sage.notFollowedBy (Sage.string $ fromString "\"\""))
+              <|> (Sage.char '\\' *> Sage.satisfy (`elem` quoted))
+          )
+        <* Sage.string (fromString "\"\"\"")
 
     arrayParser =
       VArray
