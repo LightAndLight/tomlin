@@ -19,7 +19,9 @@ library
         base ^>=4.20.2.0,
         bytestring,
         containers,
-        mtl >=2.3.2,
+        mtl >2.3 && <2.4,
+        -- See [Note: `runWriterT` from `transformers`]
+        transformers,
         text >=2.0,
         sage
     hs-source-dirs:   src

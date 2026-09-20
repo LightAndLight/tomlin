@@ -61,7 +61,14 @@ import Control.Monad.Except (ExceptT, runExceptT)
 import Control.Monad.Reader (ReaderT (..))
 import Control.Monad.Reader.Class (ask)
 import Control.Monad.State (State, StateT, get, lift, put, runState, runStateT)
-import Control.Monad.Writer.CPS (WriterT, runWriterT)
+
+{- [Note: `runWriterT` from `transformers`]
+
+This really should come from `mtl`, but `runWriterT` wasn't re-exported until `mtl-2.3.2`.
+At the time of writing (2026-09-20) `mtl-2.3.2` is not in nixpkgs, so we
+import from `transformers` here for convenience.
+-}
+import Control.Monad.Trans.Writer.CPS (WriterT, runWriterT)
 import Control.Monad.Writer.Class (tell)
 import Data.Bifunctor (first)
 import Data.ByteString (ByteString)
