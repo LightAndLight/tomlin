@@ -3,6 +3,10 @@ module Test.TomlSpec (spec) where
 import Control.Applicative ((<|>))
 import qualified Data.Map as Map
 import Data.String (fromString)
+import Data.Time.Calendar.MonthDay (monthAndDayToDayOfYear)
+import Data.Time.Calendar.OrdinalDate (fromOrdinalDate, isLeapYear)
+import Data.Time.Clock (UTCTime (..))
+import Data.Time.LocalTime (TimeOfDay (..), timeOfDayToTime)
 import Test.Hspec (Spec, describe, it, shouldBe)
 import qualified Toml
 
@@ -345,3 +349,29 @@ spec = do
           Toml.decode toml decoder
         )
         `shouldBe` Left (Toml.UnexpectedFields [length input1])
+
+  describe "datetimes" $ do
+    it "offset datetime (UTC)" $ do
+      let
+        mkUTCTime y m d hour minute second =
+          UTCTime
+            (fromOrdinalDate y $ monthAndDayToDayOfYear (isLeapYear y) m d)
+            (timeOfDayToTime $ TimeOfDay hour minute second)
+      let
+        datetime = "2026-09-22T13:14:15Z"
+        input =
+          unlines
+            [ "key = " <> datetime
+            ]
+
+        decoder =
+          Toml.key (fromString "key") Toml.utcTime
+
+      ( do
+          toml <- Toml.parse $ fromString input
+          Toml.decode toml decoder
+        )
+        `shouldBe` Right (mkUTCTime 2026 09 22 13 14 15)
+
+      Toml.valuePrinter (Toml.VOffsetTime 2026 09 22 13 14 15)
+        `shouldBe` fromString datetime

@@ -1,6 +1,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Toml
   ( -- * Reading files
@@ -21,6 +22,8 @@ module Toml
   , string
   , text
   , pstring
+  , datetime
+  , utcTime
   , list
   , record
   , RecordDecoder
@@ -46,11 +49,13 @@ module Toml
   , Toml (..)
   , TomlKeyEntry (..)
   , TomlValue (..)
+  , Datetime (..)
   , TomlItem (..)
 
     -- ** Printing
   , keyPrinter
   , valuePrinter
+  , datetimePrinter
   )
 where
 
@@ -75,6 +80,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.Char as Char
 import Data.Either (partitionEithers)
+import Data.Fixed (Pico)
 import Data.Foldable (foldlM)
 import Data.Function (on)
 import Data.Functor (void)
@@ -88,6 +94,12 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
 import Data.Text.Lazy.Builder (Builder)
 import qualified Data.Text.Lazy.Builder as Builder
+import Data.Time.Calendar.MonthDay (monthAndDayToDayOfYear)
+import Data.Time.Calendar.OrdinalDate (fromOrdinalDate, isLeapYear)
+import Data.Time.Clock (UTCTime (..))
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.LocalTime (TimeOfDay (..), timeOfDayToTime)
+import Numeric (readDec)
 import qualified Text.Sage as Sage
 
 load :: FilePath -> Decoder a -> IO (Either TomlError a)
@@ -161,6 +173,10 @@ data TomlError
       !Int
       -- | Missing field name
       !Text
+  | -- | A value was something other than a datetime.
+    ExpectedDatetime
+      -- | Offset
+      !Int
   deriving (Show, Eq)
 
 parse :: ByteString -> Either TomlError Toml
@@ -228,6 +244,7 @@ valueParser ctx =
   valueToken $
     boolParser
       <|> stringParser
+      <|> datetimeParser
       <|> multilineStringParser
       <|> arrayParser
       <|> recordParser
@@ -252,6 +269,42 @@ valueParser ctx =
           (Sage.try $ Sage.char '"' <* Sage.notFollowedBy (Sage.string $ fromString "\"\""))
         <*> many (Sage.satisfy (`notElem` quoted) <|> Sage.char '\\' *> Sage.satisfy (`elem` quoted))
         <* Sage.char '"'
+
+    datetimeParser =
+      fmap VDatetime $
+        Datetime
+          <$> fourDigitParser
+          <* Sage.char '-'
+          <*> twoDigitParser
+          <* Sage.char '-'
+          <*> twoDigitParser
+          <* Sage.char 'T'
+          <*> twoDigitParser
+          <* Sage.char ':'
+          <*> twoDigitParser
+          <* Sage.char ':'
+          <*> twoDigitParser
+          <* Sage.char 'Z'
+      where
+        fourDigitParser :: Integral n => Sage.Parser n
+        fourDigitParser =
+          ( \a b c d -> case readDec [a, b, c, d] of
+              [(n, "")] -> n
+              _ -> undefined
+          )
+            <$> Sage.satisfy Char.isDigit
+            <*> Sage.satisfy Char.isDigit
+            <*> Sage.satisfy Char.isDigit
+            <*> Sage.satisfy Char.isDigit
+
+        twoDigitParser :: Integral n => Sage.Parser n
+        twoDigitParser =
+          ( \a b -> case readDec [a, b] of
+              [(n, "")] -> n
+              _ -> undefined
+          )
+            <$> Sage.satisfy Char.isDigit
+            <*> Sage.satisfy Char.isDigit
 
     multilineStringParser =
       VString . Text.pack
@@ -344,6 +397,18 @@ data TomlValue
   | VInt !Int
   | VArray ![Located TomlValue]
   | VRecord ![(Located Text, Located TomlValue)]
+  | VDatetime !Datetime
+  deriving (Show, Eq)
+
+data Datetime
+  = Datetime
+  { dtYear :: !Integer
+  , dtMonth :: !Int
+  , dtDay :: !Int
+  , dtHour :: !Int
+  , dtMinute :: !Int
+  , dtSecond :: !Int
+  }
   deriving (Show, Eq)
 
 newtype Decoder a = Decoder (StateT Toml (Either TomlError) a)
@@ -550,6 +615,23 @@ pstring p =
           first (StringParseError offset input) $ Sage.parse (p <* Sage.eof) input
         _ -> Left $ ExpectedString offset
 
+datetime :: ValueDecoder Datetime
+datetime =
+  ValueDecoder $
+    \(Located offset value) ->
+      case value of
+        VDatetime dt -> Right dt
+        _ -> Left $ ExpectedDatetime offset
+
+utcTime :: ValueDecoder UTCTime
+utcTime =
+  fmap (\(Datetime y m d hour minute second) -> mkUTCTime y m d hour minute second) datetime
+  where
+    mkUTCTime y m d hour minute second =
+      UTCTime
+        (fromOrdinalDate y $ monthAndDayToDayOfYear (isLeapYear y) m d)
+        (timeOfDayToTime $ TimeOfDay hour minute (fromIntegral second))
+
 -- | Decode an array.
 list :: ValueDecoder a -> ValueDecoder [a]
 list decoder =
@@ -630,6 +712,7 @@ valuePrinter value =
     VFalse -> fromString "false"
     VString s -> fromString "\"" <> foldMap escapeChar (Text.unpack s) <> fromString "\""
     VInt n -> fromString (show n)
+    VDatetime dt -> datetimePrinter dt
     VArray items ->
       fromString "["
         <> sepBy (fromString ", ") (fmap (valuePrinter . locatedValue) items)
@@ -647,3 +730,20 @@ valuePrinter value =
     escapeChar :: Char -> Builder
     escapeChar '"' = fromString "\\\""
     escapeChar c = Builder.fromText $ Text.singleton c
+
+datetimePrinter :: Datetime -> Builder
+datetimePrinter (Datetime y m d hour minute second) =
+  fromString (padZero 4 $ show y)
+    <> fromString "-"
+    <> fromString (padZero 2 $ show m)
+    <> fromString "-"
+    <> fromString (padZero 2 $ show d)
+    <> fromString "T"
+    <> fromString (padZero 2 $ show hour)
+    <> fromString ":"
+    <> fromString (padZero 2 $ show minute)
+    <> fromString ":"
+    <> fromString (padZero 2 $ show second)
+    <> fromString "Z"
+  where
+    padZero n str = replicate (max 0 $ n - length str) '0' ++ str
