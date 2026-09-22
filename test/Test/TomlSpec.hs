@@ -373,5 +373,5 @@ spec = do
         )
         `shouldBe` Right (mkUTCTime 2026 09 22 13 14 15)
 
-      Toml.valuePrinter (Toml.VOffsetTime 2026 09 22 13 14 15)
+      Toml.valuePrinter (Toml.VDatetime $ Toml.Datetime 2026 09 22 13 14 15)
         `shouldBe` fromString datetime
